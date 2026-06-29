@@ -32,16 +32,7 @@ You should get JSON back listing the model (and `"n_ctx": 32768`, `"owned_by": "
 
 > Replace `<SERVER_IP>` with your server's LAN address.
 
-## 2. Common gotcha: `baseURL` typo
-
-The host and port are separated by a **colon**, not a dot:
-
-```
-http://<SERVER_IP>.8080/v1   # WRONG — dot before port
-http://<SERVER_IP>:8080/v1   # correct
-```
-
-## 3. opencode.jsonc
+## 2. opencode.jsonc
 
 llama.cpp is OpenAI-compatible, so use the openai-compatible adapter and override `baseURL`:
 
@@ -69,7 +60,7 @@ llama.cpp is OpenAI-compatible, so use the openai-compatible adapter and overrid
 |---|---|---|
 | provider key | `llamacpp` | Arbitrary id you reference |
 | `npm` | `@ai-sdk/openai-compatible` | Adapter for OpenAI-compatible servers |
-| `options.baseURL` | `http://<SERVER_IP>:8080/v1` | Your server (colon + `/v1`) |
+| `options.baseURL` | `http://<SERVER_IP>:8080/v1` | Your server (`/v1` endpoint) |
 | `models` key | `gemma4` | Model **id** opencode sends — must match the server's `--alias gemma4` |
 
 Reference the model in opencode as **`llamacpp/gemma4`** (provider key + model key).
@@ -91,7 +82,7 @@ Only if you launched with `--api-key`, add it under `options`:
 
 llama.cpp accepts any non-empty key if you didn't set one.
 
-## 4. Smoke test
+## 3. Smoke test
 
 ```bash
 curl http://<SERVER_IP>:8080/v1/chat/completions \
