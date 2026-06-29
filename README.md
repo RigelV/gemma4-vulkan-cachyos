@@ -60,5 +60,5 @@ See [`run_server.sh`](run_server.sh) for the runnable version.
 - [x] llama.cpp built with `-DGGML_VULKAN=ON`
 - [x] Full GPU offload confirmed (`Vulkan0` buffer in VRAM)
 - [x] E4B QAT model running, multimodal (`mmproj`) loaded
-- [x] 32K context, ~4.4 GiB VRAM at idle load
+- [x] 32K context, ~4.9 GB VRAM at idle (radeontop, model loaded)
 - [x] opencode connected directly over `:8080`
