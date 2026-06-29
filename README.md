@@ -1,5 +1,7 @@
 # gemma4-vulkan-cachyos
 
+> **💡 Not on a Vega 64?** This setup works on **any GPU with a working Vulkan driver** — most usefully, **newer AMD cards** (RDNA / RX 6000 / 7000 series). The Vega 64 (gfx900) is just *this* machine's card; it's the example here because losing ROCm support is what forced the Vulkan route. Vulkan also technically runs on Intel Arc and NVIDIA, though NVIDIA users are almost always better off with llama.cpp's **CUDA** backend instead. Adjust the GPU-specific bits (driver package in [`01`](docs/01-build-vulkan.md), VRAM/context math in [`03`](docs/03-run-tuning.md)) to your hardware.
+
 Running **Google Gemma 4 (E4B QAT)** locally on a **low-end AMD Vega 64 (gfx900)** under **CachyOS**, using **llama.cpp with the Vulkan backend** — and serving it to [opencode](https://opencode.ai) over an OpenAI-compatible API.
 
 This repo documents a full, hard-won setup: building llama.cpp for Vulkan on CachyOS, swapping the binary into Unsloth Studio, tuning the run parameters for an 8 GB card, and wiring it into opencode.
