@@ -1,8 +1,10 @@
-# 02 — Swapping the Vulkan binary into Unsloth Studio
+# 02 — (Optional) Swapping the Vulkan binary into Unsloth Studio
 
-Unsloth Studio ships its **own** pre-built `llama.cpp` (a CPU build). To make Studio's bundled server use the GPU, replace its binary with the Vulkan build from [step 01](01-build-vulkan.md).
+> **This page is only relevant if you have Unsloth Studio installed and want *its* bundled server to be GPU-accelerated.**
+>
+> You do **not** need any of this to run the model. The `llama-server` you built in [step 01](01-build-vulkan.md) runs directly from its build directory — that's exactly what [`run_server.sh`](../run_server.sh) and the [opencode guide](04-opencode.md) use. If you don't use Studio, **skip to [03 — Run parameters and tuning](03-run-tuning.md).**
 
-> **Note:** This step is only needed if you want Studio's *bundled* server to be GPU-accelerated. For the opencode integration in this repo we actually run our **own** `llama-server` directly (see [04](04-opencode.md)), so this swap is optional. It's documented here because it was part of the original journey.
+Unsloth Studio ships its **own** pre-built `llama.cpp` (a CPU build). The steps below replace that bundled binary with the Vulkan build so Studio's own server uses the GPU.
 
 ## 1. Find the real binary (not a log file)
 
