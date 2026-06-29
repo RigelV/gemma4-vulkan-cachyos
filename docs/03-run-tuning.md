@@ -14,13 +14,14 @@ How the launch flags were chosen for Gemma 4 **E4B QAT** on a Vega 64.
 ## The flags
 
 ```bash
--ngl 99              # full GPU offload — E4B fits entirely
--c 32768             # context window (see tuning below)
--fa on               # flash attention: keeps KV cache compact + stable on RADV
--ctk q8_0 -ctv q8_0  # quantize KV cache (~half the size of f16)
--b 16 -ub 16         # small batch / micro-batch — crash mitigation on this stack
---alias gemma4       # advertise a clean model id (instead of the long file path)
---host 0.0.0.0       # bind all interfaces so the LAN/opencode can reach it
+-ngl 99                       # full GPU offload — E4B fits entirely
+-c 131072                     # full trained context — fits at ~65% VRAM (see below)
+-fa on                        # flash attention: keeps KV cache compact + stable on RADV
+-ctk q8_0 -ctv q8_0           # quantize KV cache (~half the size of f16)
+-b 256 -ub 256                # measured prefill optimum on this stack (see below)
+--temp 0.2 --top-p 0.95 --top-k 64   # sampling (see Sampling parameters)
+--alias gemma4                # advertise a clean model id (instead of the long file path)
+--host 0.0.0.0                # bind all interfaces so the LAN/opencode can reach it
 --port 8080
 ```
 
@@ -48,16 +49,53 @@ KV cache grows linearly with context. The cost-per-token was **measured** on thi
 
 Per-token cost from the deltas: 32K→64K = ~7.8 MiB/1K, 64K→128K = ~7.0 MiB/1K → **~7.5 MiB/1K** average, rock-steady linear scaling.
 
-**Takeaway:** even at the model's full trained context of **131072** (`n_ctx_train`), E4B sits at just **69% VRAM (5.6 GB of 8 GB)** with no spill. On this card, **128K is comfortably the practical max** — the limit is the model's useful context, not VRAM.
+**Takeaway:** even at the model's full trained context of **131072** (`n_ctx_train`), E4B sits at just **69% VRAM (5.6 GB of 8 GB)** with no spill. On this card, **128K is comfortably the practical max** — the limit is the model's useful context, not VRAM. That's why `-c 131072` is the recommended default.
 
 ### Tuning procedure
 
 1. Start at the recommended value, watch `radeontop` during a real workload.
-2. If VRAM stays well under ~7.5 GiB **and GTT stays flat** → raise `-c` one step (49152, 65536, 131072).
-3. If it OOMs, maxes VRAM, or **GTT climbs** (see below) → drop `-c`, or `-b 8`.
-4. Need more context but VRAM is tight? Use **`-ctk q4_0 -ctv q4_0`** (4-bit KV) to halve the cache again, with a small quality tradeoff on very long contexts.
+2. If VRAM stays well under ~7.5 GiB **and GTT stays flat** → you have headroom to spare (default already at full 128K context).
+3. If it OOMs, maxes VRAM, or **GTT climbs** (see below) → drop `-c`, or `-b`.
+4. Need to free VRAM? Use **`-ctk q4_0 -ctv q4_0`** (4-bit KV) to halve the cache, with a small quality tradeoff on very long contexts.
 
 > Change **one lever at a time** and re-check.
+
+## Prefill / batch-size tuning
+
+`-b` (batch) and `-ub` (micro-batch) control how many prompt tokens are processed per step during **prefill** (prompt ingestion). They do **not** affect generation tok/s — only how fast a prompt is read. For coding via opencode, where every request re-ingests a large context, this matters a lot.
+
+The original `-b 16 -ub 16` was a **crash workaround** for early instability on this RADV stack. Once stable, it turned out to be leaving ~2× prefill performance on the table. Measured at `-c 131072` (full context) with a ~20K-token prompt:
+
+| `-b` / `-ub` | prompt eval | tok/s | vs baseline |
+|---|---|---|---|
+| 16 | 129337 ms | 154.84 | — |
+| **256** | **59635 ms** | **335.81** | **~2.17× (peak)** |
+| 512 | 65104 ms | 307.60 | ~1.99× (regresses) |
+
+**`-b 256 -ub 256` is the measured sweet spot** — and notably **512 is *slower* than 256**. Throughput rises, peaks at 256, then dips: past the optimum, larger scratch buffers and cache pressure on the bandwidth-bound Vega 64 outweigh the extra parallelism. A nice reminder to **measure, not assume "bigger = faster."**
+
+VRAM impact is negligible — at `-c 131072` + `-b 256` + a 20K prompt, peak VRAM was **5258 MB (65%)** with GPU pinned at 100% and GTT flat (no spill).
+
+> If you hit instability (crashes/hangs) on your driver stack, step back down toward `-b 64` or `-b 16`. On this setup (Mesa RADV, CachyOS), `-b 256` was stable across repeated runs.
+
+## Sampling parameters
+
+Google's recommended sampling defaults for Gemma:
+
+```bash
+--temp 1.0 --top-p 0.95 --top-k 64
+```
+
+llama.cpp's built-in defaults (e.g. `temp 0.8`, `top-k 40`) are *not* what Gemma was calibrated for, so passing the official trio gives the intended behavior. Performance impact is effectively zero.
+
+**For coding/agentic use via opencode**, lower the temperature for more deterministic output:
+
+| Use case | Suggested |
+|---|---|
+| General chat (Google default) | `--temp 1.0 --top-p 0.95 --top-k 64` |
+| **Coding via opencode** | `--temp 0.2 --top-p 0.95 --top-k 64` |
+
+`--temp 0.0` gives fully greedy/deterministic output if you want maximum repeatability. Note: opencode may send its own per-request sampling params, which override these server-side defaults.
 
 ## Detecting VRAM spill
 
@@ -119,6 +157,8 @@ Also worth noting: **q4 vs q8 KV barely affects speed** (22.71 vs 21.72) — the
 
 ## Multimodal note
 
-E4B is multimodal — the server loads an `mmproj-BF16.gguf` projector automatically, enabling **image** (and experimental **audio**) input. It adds a small amount of VRAM. (For the 12B above, dropping it with `--no-mmproj` was one way to claw back ~1 GB.) Harmless startup warnings about control tokens can be ignored.
+E4B is multimodal — the server loads an `mmproj-BF16.gguf` projector automatically, enabling **image** (and experimental **audio**) input. It adds ~0.5 GB VRAM.
+
+**Should you disable it with `--no-mmproj` for coding?** On E4B, **no — keep it.** The projector only runs when you actually send an image; for pure text/coding it sits idle and costs **no tok/s**. With ~2.5 GB headroom even at 128K, the ~0.5 GB it occupies isn't needed elsewhere, so there's no runtime benefit to dropping it — keep it for image support. (Contrast the 12B above, where `--no-mmproj` *was* worth it purely to reclaim VRAM and reduce spill.) Harmless startup warnings about control tokens can be ignored.
 
 Next: [04 — opencode integration](04-opencode.md)
