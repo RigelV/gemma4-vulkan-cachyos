@@ -46,13 +46,14 @@ The Vega 64 (gfx900) lost official **ROCm** support after ROCm 5.6, which breaks
 ```bash
 ./llama-server -hf unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL \
   --alias gemma4 \
-  -ngl 99 -c 32768 -fa on \
+  -ngl 99 -c 131072 -fa on \
   -ctk q8_0 -ctv q8_0 \
-  -b 16 -ub 16 \
+  -b 256 -ub 256 \
+  --temp 0.2 --top-p 0.95 --top-k 64 \
   --host 0.0.0.0 --port 8080
 ```
 
-See [`run_server.sh`](run_server.sh) for the runnable version.
+See [`run_server.sh`](run_server.sh) for the runnable version, and [docs/03](docs/03-run-tuning.md) for how each flag was tuned (measured ~2.17× prefill at `-b 256`, full 128K context at ~65% VRAM).
 
 ## Status
 
@@ -60,5 +61,6 @@ See [`run_server.sh`](run_server.sh) for the runnable version.
 - [x] llama.cpp built with `-DGGML_VULKAN=ON`
 - [x] Full GPU offload confirmed (`Vulkan0` buffer in VRAM)
 - [x] E4B QAT model running, multimodal (`mmproj`) loaded
-- [x] 32K context, ~4.9 GB VRAM at idle (radeontop, model loaded)
+- [x] 128K context, ~5.3 GB VRAM under load (radeontop, ~65% — no spill)
+- [x] Prefill tuned: `-b 256` → ~336 tok/s (~2.17× vs `-b 16`)
 - [x] opencode connected directly over `:8080`
