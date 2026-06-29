@@ -35,7 +35,7 @@ The Vega 64 (gfx900) lost official **ROCm** support after ROCm 5.6, which breaks
 | Guide | What it covers |
 |---|---|
 | [docs/01-build-vulkan.md](docs/01-build-vulkan.md) | CachyOS dependencies (RADV, Vulkan headers, SPIRV-Tools) and building llama.cpp with Vulkan |
-| [docs/02-studio-swap.md](docs/02-studio-swap.md) | Swapping the Vulkan binary into Unsloth Studio's bundled llama.cpp |
+| [docs/02-studio-swap.md](docs/02-studio-swap.md) | **(Optional — only if you use Unsloth Studio)** Swapping the Vulkan binary into Unsloth Studio's bundled llama.cpp |
 | [docs/03-run-tuning.md](docs/03-run-tuning.md) | Launch parameters, the E4B QAT profile, and VRAM/context tuning math |
 | [docs/04-opencode.md](docs/04-opencode.md) | Connecting opencode directly to llama-server over the LAN |
 
