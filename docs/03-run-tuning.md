@@ -16,7 +16,7 @@ How the launch flags were chosen for Gemma 4 **E4B QAT** on a Vega 64.
 ```bash
 -ngl 99                       # full GPU offload — E4B fits entirely
 -c 131072                     # full trained context — fits at ~65% VRAM (see below)
--fa on                        # flash attention: keeps KV cache compact + stable on RADV
+-fa on                        # flash attention: 2.7-4.4x prefill on gfx900 (see below)
 -ctk q8_0 -ctv q8_0           # quantize KV cache (~half the size of f16)
 -b 256 -ub 256                # measured prefill optimum on this stack (see below)
 --temp 0.2 --top-p 0.95 --top-k 64   # sampling (see Sampling parameters)
@@ -33,7 +33,7 @@ This build requires a **value**: `-fa on` (or `off`/`auto`). Bare `-fa` fails be
 error: unknown value for --flash-attn: '-ctk'
 ```
 
-Use **`-fa on`** explicitly — you want flash attention on for the KV-cache savings, not left to `auto`.
+Use **`-fa on`** explicitly — and you *do* want it on: it's a large speedup on this card (see below), not just a KV-cache convenience.
 
 ## VRAM / context math
 
@@ -62,21 +62,57 @@ Per-token cost from the deltas: 32K→64K = ~7.8 MiB/1K, 64K→128K = ~7.0 MiB/1
 
 ## Prefill / batch-size tuning
 
-`-b` (batch) and `-ub` (micro-batch) control how many prompt tokens are processed per step during **prefill** (prompt ingestion). They do **not** affect generation tok/s — only how fast a prompt is read. For coding via opencode, where every request re-ingests a large context, this matters a lot.
+`-b` (batch) and `-ub` (micro-batch) control how many prompt tokens are processed per step during **prefill** (prompt ingestion). They mainly affect how fast a prompt is *read*, not generation speed. For coding via opencode, where every request re-ingests a large context, prefill throughput matters a lot.
 
-The original `-b 16 -ub 16` was a **crash workaround** for early instability on this RADV stack. Once stable, it turned out to be leaving ~2× prefill performance on the table. Measured at `-c 131072` (full context) with a ~20K-token prompt:
+> **Methodology note:** the numbers below come from **`llama-bench`**, not ad-hoc `curl` timing. `llama-bench` warms up, repeats each test (`-r 5`), and reports mean ± stdev — so it avoids the prompt-cache trap (a re-sent identical prompt hits llama.cpp's KV cache and reports a fake ~29 t/s) and averages out transient noise. **On a Vega 64, pin the GPU clocks first** and keep the machine quiet — otherwise long tests (32K) show large error bars from P-state bouncing / thermal effects:
+> ```bash
+> echo manual | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
+> echo high   | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
+> # ...run llama-bench as your user (no sudo, so the HF cache is found)...
+> echo auto   | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
+> ```
+> (Also stop any `radeontop` stream and close other GPU apps during timing. `llama-bench --prio 1..3` needs root; skip it — pinned clocks matter far more.)
 
-| `-b` / `-ub` | prompt eval | tok/s | vs baseline |
+### Micro-batch (`-ub`) sweep
+
+Measured with `-b 256`, `-fa on`, `q8_0` KV (both K and V), `-r 5`, across three prompt lengths (t/s, higher is better):
+
+| `-ub` | pp2048 | pp16384 | pp32768 |
 |---|---|---|---|
-| 16 | 129337 ms | 154.84 | — |
-| **256** | **59635 ms** | **335.81** | **~2.17× (peak)** |
-| 512 | 65104 ms | 307.60 | ~1.99× (regresses) |
+| 128 | 648.65 | 535.62 | 467.47 |
+| **256** | **665–676** | **562–567** | **453–479** |
+| 512 | 623.86 | 540.15 | 472.29 |
 
-**`-b 256 -ub 256` is the measured sweet spot** — and notably **512 is *slower* than 256**. Throughput rises, peaks at 256, then dips: past the optimum, larger scratch buffers and cache pressure on the bandwidth-bound Vega 64 outweigh the extra parallelism. A nice reminder to **measure, not assume "bigger = faster."**
+**`-ub 256` is the sweet spot**: it beats 128 (~14% at 16K) and edges out 512, which starts to regress. Throughput rises to 256, then flattens/dips — past the optimum, larger micro-batches overflow the tiny cache and add scratch-buffer pressure. On this **cache-starved GCN5 die (4 MB L2, no L3)**, ~256 tokens per micro-batch is about the point where memory bandwidth saturates without blowing L2 locality. A good reminder to **measure, not assume "bigger = faster"** — a separate `-b 1024` bench showed `ub` *collapsing* at 1024 (255 t/s) purely from oversized batching.
 
-VRAM impact is negligible — at `-c 131072` + `-b 256` + a 20K prompt, peak VRAM was **5258 MB (65%)** with GPU pinned at 100% and GTT flat (no spill).
+> An informal `curl` test once suggested `ub=64` was faster; `llama-bench` did **not** confirm it — `ub=128` (64's neighbor) is measurably *below* the 256 peak. That earlier result was measurement noise, not a real effect. (The tempting "64 CUs → ub 64" mapping doesn't hold either: `-ub` counts *tokens*, not compute units, and the optimum is set by L2 locality, not CU count.)
 
-> If you hit instability (crashes/hangs) on your driver stack, step back down toward `-b 64` or `-b 16`. On this setup (Mesa RADV, CachyOS), `-b 256` was stable across repeated runs.
+Generation (`tg128`) is flat at **~66 t/s** regardless of `-ub` — micro-batch only affects prefill, as expected.
+
+The original `-b 16 -ub 16` was a **crash workaround** for early RADV instability — once stable, it left ~2× prefill on the table.
+
+VRAM impact of batch size is negligible — at `-c 131072` + `-b 256` + a 20K prompt, peak VRAM was **5258 MB (65%)** with GPU pinned and GTT flat (no spill).
+
+> If you hit instability (crashes/hangs) on your driver stack, step back toward `-b 64` or `-b 16`. On this setup (Mesa RADV, CachyOS), `-b 256` was stable across repeated runs.
+
+### Flash Attention on gfx900 — testing the folklore
+
+A widely-repeated claim holds that **Flash Attention is slower on Vega 64 / gfx900** ("the compute units struggle with FA's memory access patterns"). **We tested it with `llama-bench` — and on this stack it is false.** FA is a large win at *every* context length, and the advantage **grows** with context:
+
+| Test | FA **on** t/s | FA **off** t/s | FA speedup |
+|---|---|---|---|
+| pp2048 | 773.42 | 288.24 | **2.68×** |
+| pp16384 | 643.92 | 186.22 | **3.46×** |
+| pp32768 | 580.47 | 133.10 | **4.36×** |
+| tg128 (generation) | 68.20 | 33.85 | **2.01×** |
+
+*(Measured `-b 256 -ub 256`, `q8_0` K-cache; the FA-off leg used f16 V-cache. The gap is far too large for the V-cache format to matter.)*
+
+Two takeaways:
+1. **Keep `-fa on`.** It is one of the most impactful flags in the config — 2.7–4.4× prefill and ~2× generation. FA-off would be crippling at 128K.
+2. **The claim is likely stale/misattributed.** llama.cpp's Vulkan FA shaders have improved, and current Mesa/RADV handles them well on gfx900. Also, **FA is what makes quantized (`q8_0`) KV efficient** — note generation *doubled* with FA on; the non-FA quantized-KV path falls off a cliff. Reports of "FA is slower" may have compared FA-off + f16 KV against something else.
+
+> The lesson: **measure hardware folklore on your own card.** A claim that's true for one driver/model/context can be flatly wrong for yours — the only way to know is to benchmark it.
 
 ## Sampling parameters
 
