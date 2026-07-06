@@ -85,6 +85,37 @@ Measured with `-b 256`, `-fa on`, `q8_0` KV (both K and V), `-r 5`, across three
 
 **`-ub 256` is the sweet spot**: it beats 128 (~14% at 16K) and edges out 512, which starts to regress. Throughput rises to 256, then flattens/dips — past the optimum, larger micro-batches overflow the tiny cache and add scratch-buffer pressure. On this **cache-starved GCN5 die (4 MB L2, no L3)**, ~256 tokens per micro-batch is about the point where memory bandwidth saturates without blowing L2 locality. A good reminder to **measure, not assume "bigger = faster"** — a separate `-b 1024` bench showed `ub` *collapsing* at 1024 (255 t/s) purely from oversized batching.
 
+> **Why micro-batch size matters more on Vega than on RDNA3 — the architecture**
+>
+> The Vega 64 (GCN5, gfx900) has an unusual memory hierarchy for its era, and it's the
+> key to the `-ub` result:
+>
+> - **HBM2, 2048-bit bus, 484 GB/s.** Two HBM2 stacks × 1024-bit = 2048-bit total
+>   (*not* the 4096-bit of the Radeon VII / MI-series), at 945 MHz effective. 484 GB/s
+>   is a lot of raw bandwidth — but it only pays off if you keep the bus *busy*.
+> - **Only 4 MB L2, and no L3 / Infinity Cache at all.** This is the crucial difference.
+>   A modern RDNA3 card (e.g. RX 7900 XTX) pairs 960 GB/s GDDR6 with a **6 MB L2 *and* a
+>   96 MB Infinity Cache (L3)**. That large cache hierarchy absorbs small, irregular, or
+>   repeated memory accesses, so RDNA3 is fairly forgiving of small batch sizes.
+>
+> Vega has **no such safety net** — 4 MB of L2 and nothing below it, so almost every
+> weight fetch goes all the way to HBM2. Performance therefore depends entirely on
+> keeping that 2048-bit bus **saturated**:
+>
+> - **Too small a micro-batch (`ub=64`)** doesn't put enough independent work in flight
+>   to keep the memory controller's request queues full. The bus idles between fetches,
+>   HBM2 latency is exposed, and throughput drops — the card is *bandwidth-capable but
+>   under-fed*.
+> - **A larger micro-batch (`ub=256`)** issues many more concurrent memory requests, so
+>   the controller stays busy and the latency of each HBM2 fetch is hidden behind the
+>   throughput of the others. The bus runs closer to its 484 GB/s ceiling.
+>
+> This is why Vega **relies on raw bandwidth rather than cache latency**: it can't cache
+> its way out of a small batch the way RDNA3 can, so you feed it big micro-batches
+> instead. The effect plateaus once the bus is saturated — hence 256 ≈ 512 in the table
+> above, while 128 and below leave measurable throughput on the floor. On a
+> cache-rich RDNA3 card the same sweep would be much flatter.
+
 > An informal `curl` test once suggested `ub=64` was faster; `llama-bench` did **not** confirm it — `ub=128` (64's neighbor) is measurably *below* the 256 peak. That earlier result was measurement noise, not a real effect. (The tempting "64 CUs → ub 64" mapping doesn't hold either: `-ub` counts *tokens*, not compute units, and the optimum is set by L2 locality, not CU count.)
 
 Generation (`tg128`) is flat at **~66 t/s** regardless of `-ub` — micro-batch only affects prefill, as expected.
