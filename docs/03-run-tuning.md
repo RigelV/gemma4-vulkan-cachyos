@@ -9,7 +9,7 @@ How the launch flags were chosen for Gemma 4 **E4B QAT** on a Vega 64.
 | 12B Q4_K_XL | ~6.7 GB | No — fits only by spilling to RAM (or CPU offload) | Better quality; **~22 tok/s** text-only via GTT spill — see [Can this card run a 12B?](#can-this-card-run-a-12b) |
 | **E4B QAT (UD-Q4_K_XL)** | **~4.2 GB** | **Yes**, with room for big context | QAT keeps quality high at 4-bit |
 
-**QAT (Quantization-Aware Training)** simulates quantization *during* training, so the 4-bit model behaves close to full precision. It does **not** shrink VRAM below the bit-width — it makes a smaller model behave like a bigger one.
+**QAT (Quantization-Aware Training)** simulates quantization *during* training, so the 4-bit model behaves close to full precision. It does **not** shrink VRAM below the bit-width — it makes a smaller quant *behave* like a bigger one.
 
 ## The flags
 
@@ -49,7 +49,7 @@ KV cache grows linearly with context. The cost-per-token was **measured** on thi
 
 Per-token cost from the deltas: 32K→64K = ~7.8 MiB/1K, 64K→128K = ~7.0 MiB/1K → **~7.5 MiB/1K** average, rock-steady linear scaling.
 
-**Takeaway:** even at the model's full trained context of **131072** (`n_ctx_train`), E4B sits at just **69% VRAM (5.6 GB of 8 GB)** with no spill. On this card, **128K is comfortably the practical max** — the limit is the model's useful context, not VRAM. That's why `-c 131072` is the recommended default.
+**Takeaway:** even at the model's full trained context of **131072** (`n_ctx_train`), E4B sits at just **69% VRAM (5.6 GB of 8 GB)** with no spill. On this card, **128K is comfortably the practical default.**
 
 ### Tuning procedure
 
@@ -62,16 +62,23 @@ Per-token cost from the deltas: 32K→64K = ~7.8 MiB/1K, 64K→128K = ~7.0 MiB/1
 
 ## Prefill / batch-size tuning
 
-`-b` (batch) and `-ub` (micro-batch) control how many prompt tokens are processed per step during **prefill** (prompt ingestion). They mainly affect how fast a prompt is *read*, not generation speed. For coding via opencode, where every request re-ingests a large context, prefill throughput matters a lot.
+`-b` (batch) and `-ub` (micro-batch) control how many prompt tokens are processed per step during **prefill** (prompt ingestion). They mainly affect how fast a prompt is *read*, not generation speed.
 
-> **Methodology note:** the numbers below come from **`llama-bench`**, not ad-hoc `curl` timing. `llama-bench` warms up, repeats each test (`-r 5`), and reports mean ± stdev — so it avoids the prompt-cache trap (a re-sent identical prompt hits llama.cpp's KV cache and reports a fake ~29 t/s) and averages out transient noise. **On a Vega 64, pin the GPU clocks first** and keep the machine quiet — otherwise long tests (32K) show large error bars from P-state bouncing / thermal effects:
+> **Methodology note:** the numbers below come from **`llama-bench`**, not ad-hoc `curl` timing. `llama-bench` warms up, repeats each test (`-r 5`), and reports mean ± stdev — so it avoids the cold-cache and single-shot noise that made an earlier `curl` result misleading. Pin the GPU clocks first so the run isn't muddied by P-state bouncing:
 > ```bash
-> echo manual | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
-> echo high   | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
+> echo manual | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
+> echo high   | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 > # ...run llama-bench as your user (no sudo, so the HF cache is found)...
-> echo auto   | sudo tee /sys/class/drm/card0/device/power_dpm_force_performance_level
+> echo auto   | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 > ```
 > (Also stop any `radeontop` stream and close other GPU apps during timing. `llama-bench --prio 1..3` needs root; skip it — pinned clocks matter far more.)
+>
+> **Card number:** the Vega enumerates as **`card1`** here (`DRIVER=amdgpu`), but the number is **not stable** across boots/kernels. Resolve it dynamically instead of hardcoding:
+> ```bash
+> for c in /sys/class/drm/card[0-9]*; do
+>   grep -ql amdgpu "$c/device/uevent" && [ -e "$c/device/pp_dpm_mclk" ] && echo "${c##*/}"
+> done
+> ```
 
 ### Micro-batch (`-ub`) sweep
 
@@ -83,7 +90,7 @@ Measured with `-b 256`, `-fa on`, `q8_0` KV (both K and V), `-r 5`, across three
 | **256** | **665–676** | **562–567** | **453–479** |
 | 512 | 623.86 | 540.15 | 472.29 |
 
-**`-ub 256` is the sweet spot**: it beats 128 (~14% at 16K) and edges out 512, which starts to regress. Throughput rises to 256, then flattens/dips — past the optimum, larger micro-batches overflow the tiny cache and add scratch-buffer pressure. On this **cache-starved GCN5 die (4 MB L2, no L3)**, ~256 tokens per micro-batch is about the point where memory bandwidth saturates without blowing L2 locality. A good reminder to **measure, not assume "bigger = faster"** — a separate `-b 1024` bench showed `ub` *collapsing* at 1024 (255 t/s) purely from oversized batching.
+**`-ub 256` is the sweet spot**: it beats 128 (~14% at 16K) and edges out 512, which starts to regress. Throughput rises to 256, then flattens/dips — past the optimum, larger micro-batches overflow the tiny cache and stall on memory.
 
 > **Why micro-batch size matters more on Vega than on RDNA3 — the architecture**
 >
@@ -116,7 +123,7 @@ Measured with `-b 256`, `-fa on`, `q8_0` KV (both K and V), `-r 5`, across three
 > above, while 128 and below leave measurable throughput on the floor. On a
 > cache-rich RDNA3 card the same sweep would be much flatter.
 
-> An informal `curl` test once suggested `ub=64` was faster; `llama-bench` did **not** confirm it — `ub=128` (64's neighbor) is measurably *below* the 256 peak. That earlier result was measurement noise, not a real effect. (The tempting "64 CUs → ub 64" mapping doesn't hold either: `-ub` counts *tokens*, not compute units, and the optimum is set by L2 locality, not CU count.)
+> An informal `curl` test once suggested `ub=64` was faster; `llama-bench` did **not** confirm it — `ub=128` (64's neighbor) is measurably *below* the 256 peak. That earlier result was measurement noise.
 
 Generation (`tg128`) is flat at **~66 t/s** regardless of `-ub` — micro-batch only affects prefill, as expected.
 
@@ -128,7 +135,7 @@ VRAM impact of batch size is negligible — at `-c 131072` + `-b 256` + a 20K pr
 
 ### Flash Attention on gfx900 — testing the folklore
 
-A widely-repeated claim holds that **Flash Attention is slower on Vega 64 / gfx900** ("the compute units struggle with FA's memory access patterns"). **We tested it with `llama-bench` — and on this stack it is false.** FA is a large win at *every* context length, and the advantage **grows** with context:
+A widely-repeated claim holds that **Flash Attention is slower on Vega 64 / gfx900** ("the compute units struggle with FA's memory access patterns"). **We tested it with `llama-bench` — and on this stack it's the opposite.**
 
 | Test | FA **on** t/s | FA **off** t/s | FA speedup |
 |---|---|---|---|
@@ -141,9 +148,82 @@ A widely-repeated claim holds that **Flash Attention is slower on Vega 64 / gfx9
 
 Two takeaways:
 1. **Keep `-fa on`.** It is one of the most impactful flags in the config — 2.7–4.4× prefill and ~2× generation. FA-off would be crippling at 128K.
-2. **The claim is likely stale/misattributed.** llama.cpp's Vulkan FA shaders have improved, and current Mesa/RADV handles them well on gfx900. Also, **FA is what makes quantized (`q8_0`) KV efficient** — note generation *doubled* with FA on; the non-FA quantized-KV path falls off a cliff. Reports of "FA is slower" may have compared FA-off + f16 KV against something else.
+2. **The claim is likely stale/misattributed.** llama.cpp's Vulkan FA shaders have improved, and current Mesa/RADV handles them well on gfx900. Also, **FA is what makes quantized (`q8_0`) KV efficient** — another reason to keep it on.
 
 > The lesson: **measure hardware folklore on your own card.** A claim that's true for one driver/model/context can be flatly wrong for yours — the only way to know is to benchmark it.
+
+### Power & voltage tuning — where prefill actually tops out
+
+Prefill on this card is **compute-bound**, so it's natural to ask whether raising the
+GPU power limit (via LACT or `pp_od_clk_voltage`) buys more throughput. It does — but
+only up to a point, and that point is **not** the card's rated power. Everything below
+was measured with `llama-bench` (`-b 256 -ub 256 -fa on`, `q8_0` KV, `-r 5`), clocks
+pinned, on llama.cpp build 10107.
+
+#### Power-target sweep (Sapphire NITRO+ RX Vega 64, 345 W TDP)
+
+| Power target | Actual draw | pp2048 | pp16384 | pp32768 | tg128 |
+|---|---|---|---|---|---|
+| 200 W | ~200 W (clamped) | 681.05 | 563.14 | 482.40 | 65.59 |
+| **250 W** | **~250 W** | **839.94** | **722.67** | **624.70** | **65.40** |
+| 300 W (stock V) | ~250 W* | 847.98 | 724.03 | 626.71 | 66.11 |
+| 360 W (stock V) | ~250 W* | 853.81 | 729.83 | 630.86 | 66.29 |
+
+\*The card **cannot reach** a 300–360 W draw at these clocks — see below.
+
+**The knee is ~250 W, and it's not the power limit.** Going 200 → 250 W is a real
+**+23–30% prefill** gain (200 W was genuinely clamping clocks). But 250 → 300 → 360 W
+does **nothing** (853 vs 847 vs 840 is noise). The reason surfaced while watching clocks
+live: under sustained prefill load the core **clock-stretches back to ~1536 MHz**
+(voltage modulating ~1031–1137 mV) and **never holds the 1630 MHz boost state**, no
+matter how much power is *permitted*. So the real ceiling is a **thermal / clock-stretch
+limit around ~1536 MHz**, not watts. Above ~250 W of actual draw there's simply no more
+work the card will do — a higher power target just goes unused.
+
+> **More watts don't help; better cooling (or a good undervolt) does.** The only way to
+> lift prefill further would be sustaining a higher core clock — a cooling problem, not a
+> power-budget one.
+
+#### Undervolt is essentially free
+
+The card was run with an aggressive undervolt (**~1602 MHz @ 990 mV** top state, vs the
+stock **1630 MHz @ 1200 mV** — a ~200 mV reduction). Comparing it against stock voltage
+at matched settings:
+
+| Config | Voltage (top) | pp2048 | pp16384 | pp32768 | tg128 | Draw |
+|---|---|---|---|---|---|---|
+| **Undervolt** | 990 mV | 839.94 | 722.67 | 624.70 | 65.40 | ~250 W |
+| Stock @ 360 W | 1200 mV | 853.81 | 729.83 | 630.86 | 66.29 | >250 W |
+
+The undervolt costs about **+1% prefill and 0% generation** while drawing ~250 W and
+running much cooler/quieter. Because lower voltage means less heat, the undervolt can
+actually *sustain* clocks as well as thermally-limited stock — which is why the two
+nearly tie despite the 210 mV difference. **For a 24/7 inference box, the aggressive
+undervolt is the recommended operating point.**
+
+Reset to stock (to compare, or if a profile misbehaves) and restore an undervolt via
+LACT, or at the sysfs level:
+```bash
+echo "r" | sudo tee /sys/class/drm/card1/device/pp_od_clk_voltage   # restore firmware defaults
+echo "c" | sudo tee /sys/class/drm/card1/device/pp_od_clk_voltage   # commit
+```
+Prefer LACT for a full multi-state undervolt curve so its daemon re-applies the same
+profile on boot (otherwise you may be silently running an old profile — as happened
+here, which is why early "250 W ceiling" runs were really the *undervolt* ceiling).
+
+#### Generation is a hard bandwidth wall
+
+Across **every** configuration tested — 200/250/300/360 W, undervolt and stock —
+generation stayed pinned at **~65–66 t/s**. The memory clock (MCLK state 3, **945 MHz**)
+never changed, and generation is HBM2-**bandwidth-bound** (see the Vega-vs-RDNA3 sidebar
+above). No amount of core power or voltage moves it; only a memory overclock could — and
+that's **not** advised here, since HBM2 errors tend to be *silent* (wrong tokens, no
+crash) on an inference card.
+
+> **A version footnote:** updating llama.cpp from build 9840 → 10107 (~250 upstream
+> builds) was **perf-neutral** for this workload (prefill within ±0.7% at matched power).
+> The committed numbers hold across that range — the standalone build was already at the
+> gfx900 Vulkan plateau.
 
 ## Sampling parameters
 
@@ -169,7 +249,7 @@ llama.cpp's built-in defaults (e.g. `temp 0.8`, `top-k 40`) are *not* what Gemma
 llama.cpp **pre-allocates** weights + KV cache at startup, so the layout is fixed when the server launches — it does not grow at runtime. "Running out of VRAM" therefore shows up in one of two ways:
 
 1. **Hard allocation failure** — the server errors at launch (`failed to allocate buffer for kv cache`) and won't start. Back off `-c`.
-2. **Silent spill into system RAM (GTT)** — the RADV/Mesa driver satisfies the over-allocation by mapping host RAM (GTT) instead of failing. The server runs, but part of the working set is in RAM, crossing PCIe on every access. **Performance craters, no error appears.** This is the one to watch for.
+2. **Silent spill into system RAM (GTT)** — the RADV/Mesa driver satisfies the over-allocation by mapping host RAM (GTT) instead of failing. The server runs, but part of the working set is in RAM, and throughput drops as data crosses PCIe.
 
 ### The `radeontop` method
 
@@ -184,7 +264,7 @@ radeontop -d - > vram_trace.log
 - **`vram`** — dedicated GPU memory.
 - **`gtt`** — system RAM mapped for the GPU. **A rising `gtt` under load is the spill.**
 
-(Kernel-level truth, if you prefer: `cat /sys/class/drm/card0/device/mem_info_vram_used` and `.../mem_info_gtt_used`.)
+(Kernel-level truth, if you prefer: `cat /sys/class/drm/card1/device/mem_info_vram_used` and `.../mem_info_gtt_used`.)
 
 | Signature | `vram` | `gtt` | GPU % | Meaning |
 |---|---|---|---|---|
@@ -192,13 +272,13 @@ radeontop -d - > vram_trace.log
 | **Silent spill** | pinned ~97–99% | jumps well above baseline | high, but partly PCIe-wait | Overflowed into RAM ⚠️ |
 | **CPU bottleneck** | moderate | flat | **low (~25%)** | GPU starved by CPU layers |
 
-> **GPU % alone is misleading.** A spilling run can still show ~98% GPU because the card is busy *waiting on* data crossing PCIe. The figure that actually exposes a spill is **GTT**; the figure that exposes a CPU bottleneck is **low GPU %**. The ultimate arbiter is **tokens/sec** in the server log (`eval time = ... (X tokens per second)`).
+> **GPU % alone is misleading.** A spilling run can still show ~98% GPU because the card is busy *waiting on* data crossing PCIe. The figure that actually exposes a spill is **GTT**; the figure that exposes a CPU bottleneck is a **low GPU %**.
 
 For reference, healthy E4B runs (above) hold GTT flat at ~970–1110 MB across 32K→128K. Anything markedly higher under load is spill.
 
 ## Can this card run a 12B?
 
-Short answer: **yes, and faster than you'd expect — but only text-only and at modest context.** Tested with `unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL` (~6.72 GB weights, **40 dense layers, no GQA** → expensive KV cache).
+Short answer: **yes, and faster than you'd expect — but only text-only and at modest context.** Tested with `unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL` (~6.72 GB weights, **40 dense layers, no GQA**).
 
 The core squeeze: weights alone eat ~6.7 GB of ~7.4 GB usable VRAM, leaving almost nothing for KV cache + buffers. You can keep all layers on GPU **or** keep everything in VRAM — not both:
 
@@ -216,16 +296,16 @@ The standout finding: **the GTT-spilling `-ngl 99` runs (~22 tok/s) are ~2.6× f
 - **`-ngl 36`** moves 4 layers' *compute* onto the **Ryzen 7 2700X** (Zen+, 2018). The GPU stalls each token waiting on the slow CPU → GPU drops to ~25% → **8.6 tok/s**.
 - **`-ngl 99`** keeps all 40 layers *computing on the GPU*; only some weights/buffers live in host RAM and stream over PCIe. GPU stays ~96% busy → **~22 tok/s**.
 
-> **On a weak-CPU / capable-GPU box, the driver's GTT spill beats CPU offload.** PCIe bandwidth feeding the GPU is far faster than making an old CPU do the matrix math. CPU offload (`-ngl <max`) only wins with a strong CPU. So for the 12B here, **keep `-ngl 99` and accept the spill.**
+> **On a weak-CPU / capable-GPU box, the driver's GTT spill beats CPU offload.** PCIe bandwidth feeding the GPU is far faster than making an old CPU do the matrix math. CPU offload (`-ngl <max`) is the worse option here.
 
 Also worth noting: **q4 vs q8 KV barely affects speed** (22.71 vs 21.72) — the KV quant buys you *more context*, not throughput.
 
-**Verdict:** the 12B is viable at **~22 tok/s** if you drop multimodal (`--no-mmproj`) and accept ~8–16K context and zero VRAM headroom. But for coding via opencode — where the 4B's **128K context**, multimodal, and headroom matter most — **E4B remains the better daily driver**. The 12B is the "more reasoning, text-only, short-context" alternative. For a middle ground, an **8B-class model at Q4** (~5 GB weights) would likely fit fully resident with usable context and keep the GPU fed (untested suggestion, not measured).
+**Verdict:** the 12B is viable at **~22 tok/s** if you drop multimodal (`--no-mmproj`) and accept ~8–16K context and zero VRAM headroom. But for coding via opencode — where the 4B's **128K context** and headroom matter — E4B QAT remains the better pick.
 
 ## Multimodal note
 
 E4B is multimodal — the server loads an `mmproj-BF16.gguf` projector automatically, enabling **image** (and experimental **audio**) input. It adds ~0.5 GB VRAM.
 
-**Should you disable it with `--no-mmproj` for coding?** On E4B, **no — keep it.** The projector only runs when you actually send an image; for pure text/coding it sits idle and costs **no tok/s**. With ~2.5 GB headroom even at 128K, the ~0.5 GB it occupies isn't needed elsewhere, so there's no runtime benefit to dropping it — keep it for image support. (Contrast the 12B above, where `--no-mmproj` *was* worth it purely to reclaim VRAM and reduce spill.) Harmless startup warnings about control tokens can be ignored.
+**Should you disable it with `--no-mmproj` for coding?** On E4B, **no — keep it.** The projector only runs when you actually send an image; for pure text/coding it sits idle and costs **no tok/s**, only the ~0.5 GB VRAM.
 
 Next: [04 — opencode integration](04-opencode.md)
