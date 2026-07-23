@@ -14,12 +14,11 @@ The flag opts your host into the Vulkan prebuilt **when the installer runs** —
 
 ```bash
 # ❌ Does NOTHING — the install already happened; nothing reads the flag at launch
-UNSLOTH_FORCE_VULKAN=1 unsloth studio -H 192.168.88.240 -p 8888
+UNSLOTH_FORCE_VULKAN=1 unsloth studio -H 127.0.0.1 -p 8888
 
-# ✅ Export it BEFORE the installer/setup runs, so it pulls the Vulkan build
+# ✅ Export it BEFORE the installer runs, so it pulls the Vulkan build
 export UNSLOTH_FORCE_VULKAN=1
-# ...then trigger the llama.cpp install/setup (a fresh Studio start that installs
-#    llama.cpp, or the installer entrypoint)...
+curl -fsSL https://unsloth.ai/install.sh | sh   # the installer reads the flag
 ```
 
 Why it works this way: the installer's `force_vulkan_requested()` reads `UNSLOTH_FORCE_VULKAN` and, for a Vulkan-capable host, downloads `llama-<tag>-bin-ubuntu-vulkan-x64.tar.gz` from **upstream ggml-org** (the Unsloth fork manifest ships no Vulkan asset). At **runtime**, Studio decides "is this a Vulkan build?" purely by looking at the **installed files** — specifically whether `libggml-vulkan.so` sits next to `llama-server` (and no `libggml-cuda.so` / `libggml-hip.so` alongside it). So the flag's whole job is to get the right library onto disk; once it's there, Studio auto-detects Vulkan with no env var on the launch line.
@@ -33,12 +32,16 @@ Why it works this way: the installer's `force_vulkan_requested()` reads `UNSLOTH
    find ~ -name llama-server -path '*llama.cpp*' 2>/dev/null
    # e.g. ~/.unsloth/llama.cpp/build/bin/llama-server
    ```
-2. **Re-install with the flag exported:**
+2. **Re-install with the flag exported** — the installer is what reads `UNSLOTH_FORCE_VULKAN`:
    ```bash
    export UNSLOTH_FORCE_VULKAN=1
-   unsloth studio -H 192.168.88.240 -p 8888   # triggers a fresh install -> pulls the Vulkan build
+   curl -fsSL https://unsloth.ai/install.sh | sh   # fresh install -> pulls the Vulkan build
    ```
-3. **Verify Vulkan is active** — two independent checks:
+3. **Start Studio and verify Vulkan is active.** Launch Studio as usual:
+   ```bash
+   unsloth studio -H 127.0.0.1 -p 8888
+   ```
+   Then confirm with two independent checks:
    - The library is present (this is what runtime detection keys off):
      ```bash
      ls <install_dir>/build/bin/ | grep -E 'ggml-(vulkan|cuda|hip)'
