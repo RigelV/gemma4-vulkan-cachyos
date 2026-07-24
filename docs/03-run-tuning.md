@@ -2,11 +2,20 @@
 
 How the launch flags were chosen for Gemma 4 **E4B QAT** on a Vega 64.
 
+> **`llama-bench` numbers are a no-overhead ceiling.** Every `tok/s` in this doc measured
+> with **`llama-bench`** (the 4B's ~66 tg, the prefill tables) excludes the HTTP/JSON,
+> prompt assembly, and streaming cost of a live `llama-server` + opencode — so **real
+> served throughput is somewhat lower.** At the 4B's high tok/s the fixed per-token
+> overhead takes a larger relative bite; for the 12B at 8K depth the two happen to
+> converge within ~1% (see [Can this card run a 12B?](#can-this-card-run-a-12b)). Also
+> note **generation speed depends on how full the KV cache is** — always benchmark at
+> realistic depth (`llama-bench -d <ctx>`), since an empty-cache run overstates tok/s.
+
 ## Why E4B QAT?
 
 | Option | Weights | Fully fits 8 GB? | Notes |
 |---|---|---|---|
-| 12B Q4_K_XL | ~6.7 GB | No — fits only by spilling to RAM (or CPU offload) | Better quality; **~22 tok/s** text-only via GTT spill — see [Can this card run a 12B?](#can-this-card-run-a-12b) |
+| 12B Q4_K_XL | ~6.7 GB | No — fits only by spilling to RAM (or CPU offload) | Better quality; **~23 tok/s** at 8K, text-only via GTT spill — see [Can this card run a 12B?](#can-this-card-run-a-12b) |
 | **E4B QAT (UD-Q4_K_XL)** | **~4.2 GB** | **Yes**, with room for big context | QAT keeps quality high at 4-bit |
 
 **QAT (Quantization-Aware Training)** simulates quantization *during* training, so the 4-bit model behaves close to full precision. It does **not** shrink VRAM below the bit-width — it makes a smaller quant *behave* like a bigger one.
@@ -278,11 +287,11 @@ For reference, healthy E4B runs (above) hold GTT flat at ~970–1110 MB across 3
 
 ## Can this card run a 12B?
 
-Short answer: **yes, and faster than you'd expect — but only text-only and at modest context.** Tested with `unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL` (~6.72 GB weights, **40 dense layers, no GQA**).
+Short answer: **yes — ~23 tok/s at 8K context, text-only.** Tested with `unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL` (~6.85 GB weights, **40 dense layers, no GQA**).
 
-The core squeeze: weights alone eat ~6.7 GB of ~7.4 GB usable VRAM, leaving almost nothing for KV cache + buffers. You can keep all layers on GPU **or** keep everything in VRAM — not both:
+The core squeeze: weights alone eat ~6.85 GB of ~7.4 GB usable VRAM, leaving almost nothing for KV cache + buffers. You can keep all layers on GPU **or** keep everything in VRAM — not both:
 
-| Config | VRAM | GTT | GPU % | tok/s |
+| Config | VRAM | GTT | GPU % | tok/s (served, 8K) |
 |---|---|---|---|---|
 | `-ngl 99`, q8 KV, mmproj, 16K | 7877 MB (97%) | ~2496 MB | 98% | — |
 | `-ngl 99`, q8 KV, no mmproj, 16K | — | — | ~96% | **21.72** |
@@ -300,7 +309,38 @@ The standout finding: **the GTT-spilling `-ngl 99` runs (~22 tok/s) are ~2.6× f
 
 Also worth noting: **q4 vs q8 KV barely affects speed** (22.71 vs 21.72) — the KV quant buys you *more context*, not throughput.
 
-**Verdict:** the 12B is viable at **~22 tok/s** if you drop multimodal (`--no-mmproj`) and accept ~8–16K context and zero VRAM headroom. But for coding via opencode — where the 4B's **128K context** and headroom matter — E4B QAT remains the better pick.
+### `llama-bench` cross-check — and why context matters
+
+The served figures above were re-validated with **`llama-bench`** (build 10107, undervolt
+@ 250 W, direct-file load). The key lesson: **generation speed depends on how full the KV
+cache is**, because the 12B is bandwidth-bound — so you must benchmark *at depth*
+(`-d <ctx>`), not from an empty cache:
+
+| `llama-bench` run | KV depth at gen | tg128 | Note |
+|---|---|---|---|
+| `-p 2048 -n 128` | ~empty | **~29.5** | misleadingly high — tiny cache |
+| `-p 8192 -n 128` | ~empty at gen start | **29.55 ± 0.03** | prefill fills, but tg starts near-empty |
+| **`-n 128 -d 8192`** | **filled to 8K** | **22.93 ± 0.28** | ✅ matches served |
+
+**`llama-bench -d 8192` gives 22.93 tok/s — within ~1% of the served 22.71.** Two
+independent methods (bench and `llama-server` + opencode) agree, so **~23 tok/s at 8K is
+the trustworthy 12B number.** The ~29.5 from shallow-cache runs is an artifact of an empty
+KV cache and does **not** reflect real use — it does **not** mean the 12B got faster.
+
+Watch generation fall as the cache fills — a textbook bandwidth-wall demonstration:
+**~29.5 tok/s near-empty → 22.93 at 8K (−22%)**. More resident KV = more bytes streamed
+per token = lower generation. GTT stayed flat (~1110–1126 MB) across all these runs, so
+the slowdown is the **KV-cache bandwidth cost itself**, not extra PCIe spill.
+
+> **Always benchmark generation at realistic depth.** A bare `llama-bench` generation test
+> runs from a near-empty cache and *overstates* tok/s for a bandwidth-bound model. Use
+> `-d <ctx>` to pre-fill the cache to the context you actually run at.
+>
+> **Model-name note:** llama.cpp labels this GGUF `Q4_K - Medium`, but that's its generic
+> quant-type guess — it misreports Unsloth Dynamic quants. The filename
+> (`gemma-4-12b-it-UD-Q4_K_XL.gguf`) is authoritative; it *is* the `UD-Q4_K_XL` build.
+
+**Verdict:** the 12B is viable at **~23 tok/s** (8K context) if you drop multimodal (`--no-mmproj`) and accept ~8–16K context and zero VRAM headroom. But for coding via opencode — where the 4B's **128K context** and headroom matter — E4B QAT remains the better pick.
 
 ## Multimodal note
 
