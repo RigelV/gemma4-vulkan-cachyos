@@ -1,14 +1,16 @@
 # gemma4-vulkan-cachyos
 
-> **💡 Not on a Vega 64?** This setup works on **any GPU with a working Vulkan driver** — most usefully, **newer AMD cards** (RDNA / RX 6000 / 7000 series). The Vega 64 (gfx900) is just *this* machine's card; it's the example here because losing ROCm support is what forced the Vulkan route. Vulkan also technically runs on Intel Arc and NVIDIA, though NVIDIA users are almost always better off with llama.cpp's **CUDA** backend instead. Adjust the GPU-specific bits (driver package in [`01`](docs/01-build-vulkan.md), VRAM/context math in [`03`](docs/03-run-tuning.md)) to your hardware.
+> **💡 Not on a Vega 64?** This setup works on **any GPU with a working Vulkan driver** — most usefully, **newer AMD cards** (RDNA / RX 6000 / 7000 series). The Vega 64 (gfx900) is just *this* box; nothing here is Vega-specific except the tuning numbers.
 
-Running **Google Gemma 4 (E4B QAT)** locally on a **low-end AMD Vega 64 (gfx900)** under **CachyOS**, using **llama.cpp with the Vulkan backend** — and serving it to [opencode](https://opencode.ai) over an OpenAI-compatible API.
+Running **Google Gemma 4 (E4B QAT)** locally on a **low-end AMD Vega 64 (gfx900)** under **CachyOS**, using **llama.cpp with the Vulkan backend** — and serving it to [opencode](https://opencode.ai).
 
-This repo documents a full, hard-won setup: building llama.cpp for Vulkan on CachyOS, swapping the binary into Unsloth Studio, tuning the run parameters for an 8 GB card, and wiring it into opencode.
+This repo documents a full, hard-won setup: building llama.cpp for Vulkan on CachyOS, enabling Vulkan in Unsloth Studio (official on recent versions; a manual binary swap on older ones), tuning the run parameters for an 8 GB card, and wiring it into opencode.
+
+> **Note:** As of **Unsloth v0.1.50-beta**, Studio has official Vulkan support — no binary swap needed. See [docs/02](docs/02-studio-swap.md).
 
 ## Why Vulkan instead of ROCm?
 
-The Vega 64 (gfx900) lost official **ROCm** support after ROCm 5.6, which breaks the PyTorch/bitsandbytes/Triton stack Unsloth needs for **fine-tuning**. The **Vulkan** backend of llama.cpp still runs this GPU well for **inference**.
+The Vega 64 (gfx900) lost official **ROCm** support after ROCm 5.6, which breaks the PyTorch/bitsandbytes/Triton stack Unsloth needs for **fine-tuning**. The **Vulkan** backend of llama.cpp still runs it well for **inference**.
 
 > **Important:** Vulkan = **inference only**. Fine-tuning/training still requires ROCm and is **not** possible on this card locally. Train in the cloud, run the GGUF here.
 
@@ -37,7 +39,7 @@ The Vega 64 (gfx900) lost official **ROCm** support after ROCm 5.6, which breaks
 | Guide | What it covers |
 |---|---|
 | [docs/01-build-vulkan.md](docs/01-build-vulkan.md) | CachyOS dependencies (RADV, Vulkan headers, SPIRV-Tools) and building llama.cpp with Vulkan |
-| [docs/02-studio-swap.md](docs/02-studio-swap.md) | **(Optional — only if you use Unsloth Studio)** Swapping the Vulkan binary into Unsloth Studio's bundled llama.cpp |
+| [docs/02-studio-swap.md](docs/02-studio-swap.md) | **(Optional — only if you use Unsloth Studio)** Enabling Vulkan in Studio — official `UNSLOTH_FORCE_VULKAN` support on recent versions, with the legacy binary swap as a fallback |
 | [docs/03-run-tuning.md](docs/03-run-tuning.md) | Launch parameters, the E4B QAT profile, and VRAM/context tuning math |
 | [docs/04-opencode.md](docs/04-opencode.md) | Connecting opencode directly to llama-server over the LAN |
 
